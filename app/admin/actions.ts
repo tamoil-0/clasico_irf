@@ -6,7 +6,8 @@ import { z } from "zod";
 import { requireAdmin } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { verificationSchema } from "@/lib/validation";
+import { MAX_LOGO_MB, TEAM_ASSETS_BUCKET, managedTeamAssetPath } from "@/lib/storage";
+import { validateLogo, validateLogoSignature, verificationSchema } from "@/lib/validation";
 
 export type AdminActionState = { ok?: boolean; error?: string };
 
@@ -110,6 +111,42 @@ export async function uploadPaymentQr(_: AdminActionState, formData: FormData): 
   const { error } = await supabase.from("settings").update({ payment_qr_path: path }).eq("id", settingsId.data);
   if (error) { await supabase.storage.from("payment-assets").remove([path]); return { error: "No se pudo guardar el QR." }; }
   if (previous?.payment_qr_path) await supabase.storage.from("payment-assets").remove([previous.payment_qr_path]);
+  revalidatePath("/"); revalidatePath("/admin");
+  return { ok: true };
+}
+
+const LOGO_EXTENSIONS: Record<string, string> = { "image/png": "png", "image/webp": "webp", "image/svg+xml": "svg", "image/jpeg": "jpg" };
+
+export async function uploadTeamLogo(_: AdminActionState, formData: FormData): Promise<AdminActionState> {
+  await requireAdmin();
+  const parsed = z.object({ eventId: z.string().uuid(), slot: z.enum(["team_a_logo", "team_b_logo"]) })
+    .safeParse({ eventId: formData.get("eventId"), slot: formData.get("slot") });
+  if (!parsed.success) return { error: "Datos inválidos." };
+
+  const value = formData.get("logo");
+  const file = value instanceof File ? value : null;
+  const logoError = validateLogo(file, MAX_LOGO_MB);
+  if (logoError) return { error: logoError };
+  const signatureError = await validateLogoSignature(file!);
+  if (signatureError) return { error: signatureError };
+
+  const supabase = createAdminClient();
+  const path = `teams/${crypto.randomUUID()}.${LOGO_EXTENSIONS[file!.type]}`;
+  const { error: uploadError } = await supabase.storage.from(TEAM_ASSETS_BUCKET).upload(path, file!, { contentType: file!.type, upsert: false });
+  if (uploadError) return { error: "No se pudo subir el logo." };
+
+  const { data: current } = await supabase.from("events").select("team_a_logo,team_b_logo").eq("id", parsed.data.eventId).single();
+  const { data: published } = supabase.storage.from(TEAM_ASSETS_BUCKET).getPublicUrl(path);
+  const { error } = await supabase.from("events").update({ [parsed.data.slot]: published.publicUrl }).eq("id", parsed.data.eventId);
+  if (error) {
+    await supabase.storage.from(TEAM_ASSETS_BUCKET).remove([path]);
+    return { error: "No se pudo guardar el logo." };
+  }
+
+  // Solo se borra lo que subió esta app; rutas locales o URLs externas se dejan intactas.
+  const previous = managedTeamAssetPath(current?.[parsed.data.slot]);
+  if (previous && previous !== path) await supabase.storage.from(TEAM_ASSETS_BUCKET).remove([previous]);
+
   revalidatePath("/"); revalidatePath("/admin");
   return { ok: true };
 }

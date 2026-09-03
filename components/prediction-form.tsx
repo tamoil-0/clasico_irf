@@ -4,6 +4,7 @@
 import { useActionState, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, CircleCheck, ImagePlus, LockKeyhole, QrCode, X } from "lucide-react";
 import { createPrediction, type PredictionActionState } from "@/app/actions";
+import { TeamLogo } from "@/components/team-logo";
 import { DRAW_RULE_TEXT } from "@/lib/config";
 import { formatMatch, soles } from "@/lib/format";
 import { calculatedReturn } from "@/lib/risk";
@@ -55,7 +56,7 @@ export function PredictionForm({ event, settings, verified, configured, registra
             const logo = key === "TEAM_A" ? event.team_a_logo : event.team_b_logo;
             return <button key={key} type="button" onClick={() => { setTeam(key); if (!idempotencyKey) setIdempotencyKey(crypto.randomUUID()); }} aria-pressed={selected} className={`relative flex min-h-40 flex-col items-center justify-center gap-3 rounded-2xl border p-4 transition ${selected ? "border-secondary bg-secondary/[.09] shadow-[0_0_24px_rgba(255,199,37,.14)]" : "border-white/10 bg-black/25 hover:border-white/25"}`}>
               {selected && <span className="absolute right-2.5 top-2.5 flex size-6 items-center justify-center rounded-full bg-irf-gradient text-ink"><Check size={15} strokeWidth={3} /></span>}
-              <img src={logo || "/teams/team.svg"} alt="" className="size-20 object-contain drop-shadow-xl" />
+              <TeamLogo src={logo} name={name} className="size-16 sm:size-20 md:size-24" />
               <span className="text-center text-sm font-extrabold leading-tight">{name}</span>
             </button>;
           })}

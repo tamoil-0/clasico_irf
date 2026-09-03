@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { calculateExposure, calculatedReturn, projectExposure } from "@/lib/risk";
 import { validateEligibility } from "@/lib/eligibility";
-import { predictionFieldsSchema, validateReceipt, validateReceiptSignature } from "@/lib/validation";
+import { predictionFieldsSchema, validateLogo, validateReceipt, validateReceiptSignature, validateSvgMarkup } from "@/lib/validation";
+import { managedTeamAssetPath } from "@/lib/storage";
 import { maskParticipantName } from "@/lib/privacy";
 
 const closesAt = "2026-09-12T19:45:00-05:00";
@@ -56,5 +57,35 @@ describe("cálculos", () => {
     const projected = projectExposure(calculateExposure(50, 50, 1.5), "TEAM_A", 100, 1.5);
     expect(projected.balanceA).toBe(-25);
     expect(projected.balanceB).toBe(125);
+  });
+});
+
+describe("logos de equipos", () => {
+  it("acepta PNG, JPG, WEBP y SVG dentro del límite", () => {
+    for (const type of ["image/png", "image/jpeg", "image/webp", "image/svg+xml"]) {
+      expect(validateLogo(new File(["x"], "logo", { type }))).toBeNull();
+    }
+  });
+
+  it("rechaza un tipo no permitido y un archivo demasiado grande", () => {
+    expect(validateLogo(new File(["x"], "logo.gif", { type: "image/gif" }))).toContain("PNG");
+    expect(validateLogo(new File([new Uint8Array(3 * 1024 * 1024)], "logo.png", { type: "image/png" }))).toContain("2 MB");
+    expect(validateLogo(null)).toContain("Selecciona");
+  });
+
+  it("rechaza SVG con contenido activo y acepta uno limpio", () => {
+    expect(validateSvgMarkup('<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>')).toBeNull();
+    expect(validateSvgMarkup('<svg><script>alert(1)</script></svg>')).toContain("contenido activo");
+    expect(validateSvgMarkup('<svg onload="alert(1)"></svg>')).toContain("contenido activo");
+    expect(validateSvgMarkup('<svg><a href="javascript:alert(1)">x</a></svg>')).toContain("contenido activo");
+    expect(validateSvgMarkup("<html></html>")).toContain("no es un SVG");
+  });
+
+  it("solo reconoce como borrable lo que vive en el bucket administrado", () => {
+    expect(managedTeamAssetPath("https://abc.supabase.co/storage/v1/object/public/team-assets/teams/a.png")).toBe("teams/a.png");
+    expect(managedTeamAssetPath("/teams/universitario.svg")).toBeNull();
+    expect(managedTeamAssetPath("https://abc.supabase.co/storage/v1/object/public/receipts/x.png")).toBeNull();
+    expect(managedTeamAssetPath("https://cdn.externo.com/logo.png")).toBeNull();
+    expect(managedTeamAssetPath(null)).toBeNull();
   });
 });

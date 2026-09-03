@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ALLOWED_LOGO_TYPES, MAX_LOGO_MB } from "@/lib/storage";
 
 export const ALLOWED_RECEIPT_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 
@@ -39,3 +40,34 @@ export const verificationSchema = z.object({
   verifiedAmount: z.coerce.number().positive().max(10000),
   adminNote: z.string().trim().max(500).optional(),
 });
+
+
+export function validateLogo(file: File | null, maxMb: number = MAX_LOGO_MB): string | null {
+  if (!file || file.size === 0) return "Selecciona el archivo del logo.";
+  if (!ALLOWED_LOGO_TYPES.includes(file.type as (typeof ALLOWED_LOGO_TYPES)[number])) {
+    return "El logo debe ser PNG, JPG, WEBP o SVG.";
+  }
+  if (file.size > maxMb * 1024 * 1024) return `El logo no debe superar ${maxMb} MB.`;
+  return null;
+}
+
+// Un SVG es texto ejecutable: se aloja solo si no trae contenido activo.
+const UNSAFE_SVG_PATTERNS = [/<script[\s>]/i, /<foreignobject[\s>]/i, /<!entity/i, /javascript:/i, /\son\w+\s*=/i];
+
+export function validateSvgMarkup(markup: string): string | null {
+  if (!/<svg[\s>]/i.test(markup)) return "El archivo no es un SVG válido.";
+  if (UNSAFE_SVG_PATTERNS.some((pattern) => pattern.test(markup))) {
+    return "El SVG contiene contenido activo (scripts o eventos) y no puede subirse.";
+  }
+  return null;
+}
+
+export async function validateLogoSignature(file: File): Promise<string | null> {
+  if (file.type === "image/svg+xml") return validateSvgMarkup(await file.text());
+  const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const png = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  const webp = String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP";
+  const valid = file.type === "image/jpeg" ? jpeg : file.type === "image/png" ? png : file.type === "image/webp" ? webp : false;
+  return valid ? null : "El contenido del logo no coincide con su extensión.";
+}
