@@ -28,6 +28,10 @@ export const DEFAULT_SETTINGS: PublicSettings = {
   max_receipt_mb: 5,
 };
 
+// Número Yape oficial. Se muestra formateado y se copia sin espacios.
+export const PAYMENT_PHONE_DISPLAY = "+51 916 294 194";
+export const PAYMENT_PHONE_VALUE = "+51916294194";
+
 export const DRAW_RULE_TEXT = "Si el partido termina empatado, las participaciones verificadas serán destinadas a apoyar los fondos y actividades de IRF.";
 
 export function hasSupabaseEnv() {
