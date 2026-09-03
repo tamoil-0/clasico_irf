@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --irf-primary: #ffa726;
+  --irf-secondary: #ffc725;
+  --irf-bg: #0a0a0a;
+  --irf-surface: #121212;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; background: var(--irf-bg); }
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 50% -10%, rgba(255, 167, 38, .13), transparent 34rem),
+    radial-gradient(circle at 100% 34%, rgba(255, 199, 37, .05), transparent 28rem),
+    var(--irf-bg);
+  color: #fff;
+}
+button, input, textarea, select { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+
+@layer components {
+  .glass-panel {
+    @apply rounded-2xl border border-white/10 bg-white/[0.045] backdrop-blur-xl;
+  }
+  .field {
+    @apply h-12 w-full rounded-xl border border-white/10 bg-white/[0.055] px-4 text-[15px] text-white outline-none transition placeholder:text-zinc-600 focus:border-primary/70 focus:ring-4 focus:ring-primary/10;
+  }
+  .field-label { @apply mb-2 block text-sm font-semibold text-zinc-200; }
+  .primary-button {
+    @apply inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-irf-gradient px-5 py-3 text-sm font-black tracking-wide text-ink shadow-glow transition hover:brightness-105 active:scale-[.985] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none;
+  }
+  .secondary-button {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/[0.04] px-4 py-2 text-sm font-bold text-white transition hover:border-primary/40 hover:bg-white/[0.07];
+  }
+  .eyebrow {
+    @apply inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[.24em] text-secondary;
+  }
+}
+
+::selection { background: rgba(255, 199, 37, .28); color: white; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a0a0a; }
+::-webkit-scrollbar-thumb { border: 3px solid #0a0a0a; border-radius: 999px; background: #383838; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .reveal { animation: reveal .55s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes reveal { from { opacity: 0; transform: translateY(12px); } }
+}
