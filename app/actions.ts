@@ -3,21 +3,33 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createAdminClient, getSupabaseServerConfiguration } from "@/lib/supabase/admin";
-import { predictionFieldsSchema, validateReceipt, validateReceiptSignature } from "@/lib/validation";
+import {
+  PREDICTION_MESSAGES,
+  hasFieldErrors,
+  predictionFieldsSchema,
+  validateParticipationAmount,
+  validateReceipt,
+  validateReceiptSignature,
+  type PredictionFieldErrors,
+} from "@/lib/validation";
 import { predictionCode, requestFingerprint } from "@/lib/security";
-import { validateEligibility } from "@/lib/eligibility";
+import { validateEventAvailability } from "@/lib/eligibility";
+import { PREDICTION_ERRORS, friendlyRpcState, safeErrorDetails, type PredictionActionState } from "@/lib/prediction-errors";
 
-export type PredictionActionState = { error?: string; fieldErrors?: Record<string, string[]> };
+export type { PredictionActionState };
+
+const { unavailable: UNAVAILABLE, retry: RETRY, uploadFailed: UPLOAD_FAILED, staleRequest: STALE_REQUEST } = PREDICTION_ERRORS;
+const HIDDEN_FIELDS = ["eventId", "idempotencyKey", "website"] as const;
 
 export async function createPrediction(_: PredictionActionState, formData: FormData): Promise<PredictionActionState> {
   const supabaseConfiguration = getSupabaseServerConfiguration();
   if (!supabaseConfiguration.configured) {
-    console.error("[prediction:create] Configuración de Supabase incompleta.", { missing: supabaseConfiguration.missing });
-    return { error: "Supabase no está configurado correctamente en el servidor." };
+    console.error("[prediction:create] Configuración del servidor incompleta.", { missing: supabaseConfiguration.missing });
+    return { error: UNAVAILABLE };
   }
   if (!process.env.RATE_LIMIT_SECRET?.trim() && process.env.NODE_ENV === "production") {
-    console.error("[prediction:create] Falta RATE_LIMIT_SECRET en producción.");
-    return { error: "La configuración de seguridad del servidor está incompleta." };
+    console.error("[prediction:create] Falta el secreto de rate limiting en producción.");
+    return { error: UNAVAILABLE };
   }
 
   let supabase;
@@ -25,47 +37,74 @@ export async function createPrediction(_: PredictionActionState, formData: FormD
     supabase = createAdminClient();
   } catch (error) {
     logOperationError("client", error);
-    return { error: "No se pudo iniciar la conexión segura con Supabase." };
+    return { error: UNAVAILABLE };
   }
 
+  const rawAmount = formData.get("amount");
   const parsed = predictionFieldsSchema.safeParse({
     eventId: formData.get("eventId"),
     name: formData.get("name"),
     phone: formData.get("phone"),
     refundPhone: formData.get("refundPhone"),
     teamSelected: formData.get("teamSelected"),
-    amount: formData.get("amount"),
+    amount: rawAmount,
     acceptedRules: formData.get("acceptedRules"),
     idempotencyKey: formData.get("idempotencyKey"),
     website: formData.get("website") ?? "",
   });
-  if (!parsed.success) return { error: "Revisa los campos marcados.", fieldErrors: parsed.error.flatten().fieldErrors };
+  const schemaErrors: PredictionFieldErrors = parsed.success ? {} : parsed.error.flatten().fieldErrors;
+
+  // eventId/idempotencyKey/website no tienen campo visible: si fallan, la página
+  // está desactualizada o la petición no salió del formulario.
+  const brokenHiddenFields = HIDDEN_FIELDS.filter((field) => schemaErrors[field]?.length);
+  if (brokenHiddenFields.length) {
+    console.error("[prediction:create] Solicitud con campos internos inválidos.", { fields: brokenHiddenFields });
+    return { error: STALE_REQUEST };
+  }
 
   const [{ data: event, error: eventError }, { data: settings, error: settingsError }] = await Promise.all([
-    supabase.from("events").select("id,status,betting_close_at,minimum_amount,multiplier,risk_mode,risk_limit_amount").eq("id", parsed.data.eventId).maybeSingle(),
+    supabase.from("events").select("id,status,betting_close_at,minimum_amount,multiplier,risk_mode,risk_limit_amount").eq("id", String(formData.get("eventId") ?? "")).maybeSingle(),
     supabase.from("settings").select("payment_qr_path,maintenance_mode,max_receipt_mb").limit(1).maybeSingle(),
   ]);
   if (eventError) {
     logOperationError("event-read", eventError);
-    return { error: "No se pudo validar el evento. Inténtalo nuevamente." };
+    return { error: UNAVAILABLE };
   }
   if (settingsError) {
     logOperationError("settings-read", settingsError);
-    return { error: "No se pudo cargar la configuración del registro. Inténtalo nuevamente." };
+    return { error: UNAVAILABLE };
   }
-  if (!event) return { error: "Este evento ya no está disponible." };
-  if (!settings) return { error: "No se encontró la configuración necesaria para registrar la participación." };
-  if (settings.maintenance_mode) return { error: "El sitio está temporalmente en mantenimiento." };
-  const eligibilityError = validateEligibility({ amount: parsed.data.amount, minimumAmount: Number(event.minimum_amount), status: event.status, closesAt: event.betting_close_at });
-  if (eligibilityError) return { error: eligibilityError };
+  if (!event) return { error: PREDICTION_ERRORS.eventGone };
+  if (!settings) return { error: UNAVAILABLE };
+  if (settings.maintenance_mode) return { error: PREDICTION_ERRORS.maintenance };
 
+  // El estado del evento manda: si está cerrado no tiene sentido marcar campos.
+  const availabilityError = validateEventAvailability({ status: event.status, closesAt: event.betting_close_at });
+  if (availabilityError) return { error: availabilityError };
+  if (!settings.payment_qr_path) return { error: PREDICTION_ERRORS.registrationPaused };
+
+  const maxReceiptMb = Number(settings.max_receipt_mb) > 0 ? Number(settings.max_receipt_mb) : 5;
   const fileValue = formData.get("receipt");
-  const receipt = fileValue instanceof File ? fileValue : null;
-  if (!settings.payment_qr_path) return { error: "El QR oficial todavía no está configurado. Los registros permanecen cerrados." };
-  const receiptError = validateReceipt(receipt, true, settings.max_receipt_mb);
-  if (receiptError) return { error: receiptError };
-  const signatureError = await validateReceiptSignature(receipt!);
-  if (signatureError) return { error: signatureError };
+  const receipt = fileValue instanceof File && fileValue.size > 0 ? fileValue : null;
+
+  // Se valida todo junto para devolver de una sola vez cada campo con problema.
+  const fieldErrors: PredictionFieldErrors = {};
+  for (const [field, messages] of Object.entries(schemaErrors)) {
+    if (!HIDDEN_FIELDS.includes(field as (typeof HIDDEN_FIELDS)[number]) && messages?.length) fieldErrors[field] = messages;
+  }
+  // El mínimo real vive en el evento, así que este chequeo reemplaza al del esquema.
+  const amountError = validateParticipationAmount(rawAmount, Number(event.minimum_amount));
+  if (amountError) fieldErrors.amount = [amountError];
+  else delete fieldErrors.amount;
+
+  const receiptError = validateReceipt(receipt, true, maxReceiptMb);
+  if (receiptError) fieldErrors.receipt = [receiptError];
+  else {
+    const signatureError = await validateReceiptSignature(receipt!);
+    if (signatureError) fieldErrors.receipt = [signatureError];
+  }
+  if (hasFieldErrors(fieldErrors)) return { error: PREDICTION_MESSAGES.summary, fieldErrors };
+  if (!parsed.success) return { error: STALE_REQUEST };
 
   const code = predictionCode();
   let fingerprint: string;
@@ -73,17 +112,15 @@ export async function createPrediction(_: PredictionActionState, formData: FormD
     fingerprint = await requestFingerprint();
   } catch (error) {
     logOperationError("rate-limit", error);
-    return { error: "No se pudo validar la seguridad de la solicitud. Inténtalo nuevamente." };
+    return { error: RETRY };
   }
-  let receiptPath: string | null = null;
-  if (receipt && receipt.size > 0) {
-    const ext = receipt.type === "image/png" ? "png" : receipt.type === "image/webp" ? "webp" : "jpg";
-    receiptPath = `${event.id}/${crypto.randomUUID()}.${ext}`;
-    const { error } = await supabase.storage.from("receipts").upload(receiptPath, receipt, { contentType: receipt.type, upsert: false });
-    if (error) {
-      logOperationError("receipt-upload", error);
-      return { error: "No se pudo subir el comprobante." };
-    }
+
+  const ext = receipt!.type === "image/png" ? "png" : receipt!.type === "image/webp" ? "webp" : "jpg";
+  const receiptPath = `${event.id}/${crypto.randomUUID()}.${ext}`;
+  const { error: uploadError } = await supabase.storage.from("receipts").upload(receiptPath, receipt!, { contentType: receipt!.type, upsert: false });
+  if (uploadError) {
+    logOperationError("receipt-upload", uploadError);
+    return { error: UPLOAD_FAILED };
   }
 
   const { data, error } = await supabase.rpc("create_prediction_atomic", {
@@ -100,25 +137,14 @@ export async function createPrediction(_: PredictionActionState, formData: FormD
   });
   if (error) {
     logOperationError("prediction-rpc", error);
-    if (receiptPath) {
-      const { error: cleanupError } = await supabase.storage.from("receipts").remove([receiptPath]);
-      if (cleanupError) logOperationError("receipt-cleanup", cleanupError);
-    }
-    const friendly = error.message.includes("RATE_LIMIT") ? "Demasiados intentos. Espera unos minutos." :
-      error.message.includes("DUPLICATE") ? "Este registro ya fue recibido." :
-      error.message.includes("RISK_LIMIT") ? "Este equipo alcanzó temporalmente el límite de registros." :
-      error.message.includes("EVENT_CLOSED") ? "Los registros están cerrados." : "No se pudo registrar la participación. Inténtalo nuevamente.";
-    return { error: friendly };
+    const { error: cleanupError } = await supabase.storage.from("receipts").remove([receiptPath]);
+    if (cleanupError) logOperationError("receipt-cleanup", cleanupError);
+    return friendlyRpcState(error, Number(event.minimum_amount));
   }
   revalidatePath("/");
   redirect(`/registro/${String(data)}`);
 }
 
 function logOperationError(stage: string, error: unknown) {
-  const safeError = error && typeof error === "object" ? {
-    name: "name" in error ? String(error.name) : undefined,
-    code: "code" in error ? String(error.code) : undefined,
-    message: "message" in error ? String(error.message) : "Error sin mensaje",
-  } : { message: String(error) };
-  console.error(`[prediction:create] ${stage}`, safeError);
+  console.error(`[prediction:create] ${stage}`, safeErrorDetails(error));
 }

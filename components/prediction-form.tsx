@@ -1,16 +1,41 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- logos are admin-configurable; QR URLs are short-lived and previews use blob URLs */
 
-import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useActionState, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, CircleCheck, Copy, Hourglass, ImagePlus, LockKeyhole, QrCode, X } from "lucide-react";
-import { createPrediction, type PredictionActionState } from "@/app/actions";
+import { createPrediction } from "@/app/actions";
 import { TeamLogo } from "@/components/team-logo";
 import { DRAW_RULE_TEXT, PAYMENT_PHONE_DISPLAY, PAYMENT_PHONE_VALUE } from "@/lib/config";
 import { formatMatch, soles } from "@/lib/format";
+import type { PredictionActionState } from "@/lib/prediction-errors";
 import { calculatedReturn } from "@/lib/risk";
+import {
+  MAX_PARTICIPATION_AMOUNT,
+  PREDICTION_FIELD_ORDER,
+  PREDICTION_MESSAGES,
+  collectPredictionFieldErrors,
+  hasFieldErrors,
+  normalizePhoneNumber,
+  parseParticipationAmount,
+  sanitizeAmountInput,
+  validateParticipationAmount,
+} from "@/lib/validation";
 import type { EventRecord, PublicPrediction, PublicSettings, TeamSelection } from "@/lib/types";
 
 const initialState: PredictionActionState = {};
+const AMOUNT_PRESETS = [10, 20, 30, 50];
+
+// Los campos de teléfono no recortan ni limpian lo que se escribe: un número de
+// 10 dígitos o con letras llega entero a la validación y recibe su mensaje, en
+// vez de convertirse en silencio en uno que aparenta ser válido. Los separadores
+// visuales se normalizan solo al validar y al enviar, nunca en el input.
+// El tope solo evita un pegado desmedido; al ser mayor que 9, un valor
+// recortado aquí nunca puede pasar por un celular válido de 9 dígitos.
+const PHONE_INPUT_MAX_LENGTH = 20;
+
+// Token nuevo en cada respuesta: así el scroll y el foco vuelven a dispararse
+// aunque la persona reenvíe el formulario con exactamente el mismo error.
+const nextFocusToken = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 type PredictionFormProps = {
   event: EventRecord;
@@ -24,29 +49,121 @@ type PredictionFormProps = {
 };
 
 export function PredictionForm({ event, settings, predictions, supabaseConfigured, eventExists, settingsExists, dataError, registrationOpen }: PredictionFormProps) {
+  const minimumAmount = Number(event.minimum_amount);
+  const maxReceiptMb = Number(settings.max_receipt_mb) > 0 ? Number(settings.max_receipt_mb) : 5;
+
+  // Todo lo que la persona escribe vive en el estado del componente. Un error
+  // de validación nunca puede borrarlo porque nada depende del DOM del form.
   const [team, setTeam] = useState<TeamSelection | "">("");
-  const [amount, setAmount] = useState(Number(event.minimum_amount));
-  const [custom, setCustom] = useState("");
-  const [idempotencyKey, setIdempotencyKey] = useState("");
+  const [amountInput, setAmountInput] = useState(() => sanitizeAmountInput(String(event.minimum_amount ?? "")));
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [refundPhone, setRefundPhone] = useState("");
+  const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
   const [acceptedRules, setAcceptedRules] = useState(false);
-  const receiptRef = useRef<HTMLInputElement>(null);
-  const [state, action, pending] = useActionState(createPrediction, initialState);
-  useEffect(() => () => { if (receiptPreview) URL.revokeObjectURL(receiptPreview); }, [receiptPreview]);
+
+  // Se crea una sola vez y sobrevive a los reintentos: dos envíos seguidos del
+  // mismo formulario son idempotentes para el RPC.
+  const idempotencyKeyRef = useRef("");
+
+  const teamRef = useRef<HTMLDivElement>(null);
+  const amountRef = useRef<HTMLInputElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const phoneRef = useRef<HTMLInputElement>(null);
+  const refundPhoneRef = useRef<HTMLInputElement>(null);
+  const receiptGroupRef = useRef<HTMLDivElement>(null);
+  const receiptInputRef = useRef<HTMLInputElement>(null);
+  const rulesRef = useRef<HTMLInputElement>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
+
+  async function submitPrediction(_previous: PredictionActionState, formData: FormData): Promise<PredictionActionState> {
+    const clientErrors = collectPredictionFieldErrors(
+      { teamSelected: team, amount: amountInput, name, phone, refundPhone, acceptedRules },
+      { minimumAmount, receipt: receiptFile, maxReceiptMb },
+    );
+    // Se corta antes de llegar al servidor, pero sin tocar ningún valor escrito.
+    if (hasFieldErrors(clientErrors)) return { error: PREDICTION_MESSAGES.summary, fieldErrors: clientErrors, focusToken: nextFocusToken() };
+
+    if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+
+    // El payload se arma desde el estado, no desde el DOM: si React reinicia el
+    // formulario tras la acción, el comprobante y los datos siguen intactos.
+    const payload = new FormData();
+    payload.set("eventId", event.id);
+    payload.set("teamSelected", team);
+    payload.set("amount", amountInput.trim());
+    payload.set("name", name.trim());
+    payload.set("phone", normalizePhoneNumber(phone));
+    payload.set("refundPhone", normalizePhoneNumber(refundPhone));
+    payload.set("acceptedRules", "on");
+    payload.set("idempotencyKey", idempotencyKeyRef.current);
+    payload.set("website", String(formData.get("website") ?? ""));
+    if (receiptFile) payload.set("receipt", receiptFile);
+
+    const result = await createPrediction(initialState, payload);
+    return { ...result, focusToken: nextFocusToken() };
+  }
+
+  const [state, action, pending] = useActionState(submitPrediction, initialState);
+
+  // El envío se despacha a mano en lugar de usar <form action>: así React no
+  // ejecuta su reset automático al terminar la acción, que dejaba el checkbox
+  // y el input de archivo visualmente vacíos aunque el estado siguiera intacto.
+  function handleSubmit(submitEvent: React.FormEvent<HTMLFormElement>) {
+    submitEvent.preventDefault();
+    const formData = new FormData(submitEvent.currentTarget);
+    startTransition(() => action(formData));
+  }
+
+  useEffect(() => {
+    if (!receiptPreview) return;
+    return () => URL.revokeObjectURL(receiptPreview);
+  }, [receiptPreview]);
+
+  const focusTargets = useMemo(
+    () => ({
+      teamSelected: () => teamRef.current,
+      amount: () => amountRef.current,
+      name: () => nameRef.current,
+      phone: () => phoneRef.current,
+      refundPhone: () => refundPhoneRef.current,
+      receipt: () => receiptGroupRef.current,
+      acceptedRules: () => rulesRef.current,
+    }),
+    [],
+  );
+
+  useEffect(() => {
+    if (!state.focusToken) return;
+    const firstInvalid = PREDICTION_FIELD_ORDER.find((field) => state.fieldErrors?.[field]?.length);
+    const target: HTMLElement | null = (firstInvalid ? focusTargets[firstInvalid]() : null) ?? summaryRef.current;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus({ preventScroll: true });
+  }, [state, focusTargets]);
 
   const canRegister = supabaseConfigured && eventExists && settingsExists && !dataError && registrationOpen && !settings.maintenance_mode && Boolean(settings.payment_qr_url);
   const chosenName = team === "TEAM_A" ? event.team_a : team === "TEAM_B" ? event.team_b : null;
-  const possible = useMemo(() => calculatedReturn(amount || 0, Number(event.multiplier)), [amount, event.multiplier]);
   const fieldError = (key: string) => state.fieldErrors?.[key]?.[0];
+  const fieldClass = (key: string) => `field${fieldError(key) ? " border-red-400/70 focus:border-red-400 focus:ring-red-400/10" : ""}`;
 
-  function selectReceipt(file?: File) {
-    if (receiptPreview) URL.revokeObjectURL(receiptPreview);
+  // El posible resultado solo se calcula con un monto con formato válido y
+  // dentro de los límites. Nunca se multiplica lo que la persona va tecleando.
+  const validAmount = useMemo(() => {
+    if (validateParticipationAmount(amountInput, minimumAmount)) return null;
+    return parseParticipationAmount(amountInput);
+  }, [amountInput, minimumAmount]);
+  const possible = validAmount === null ? null : calculatedReturn(validAmount, Number(event.multiplier));
+
+  function selectReceipt(file?: File | null) {
+    setReceiptFile(file ?? null);
     setReceiptPreview(file ? URL.createObjectURL(file) : null);
   }
 
   function removeReceipt() {
-    if (receiptRef.current) receiptRef.current.value = "";
-    selectReceipt();
+    if (receiptInputRef.current) receiptInputRef.current.value = "";
+    selectReceipt(null);
   }
 
   return (
@@ -79,12 +196,12 @@ export function PredictionForm({ event, settings, predictions, supabaseConfigure
           <h2 id="choose-team" className="mt-1 text-lg font-black">Selecciona un equipo para continuar</h2>
           {chosenName && <p className="mt-1 text-xs font-semibold text-secondary">{chosenName}</p>}
         </div>
-        <div className="relative grid grid-cols-2 gap-3">
+        <div ref={teamRef} tabIndex={-1} className={`relative grid grid-cols-2 gap-3 rounded-2xl outline-none ${fieldError("teamSelected") ? "ring-2 ring-red-400/60" : ""}`}>
           {(["TEAM_A", "TEAM_B"] as TeamSelection[]).map((key) => {
             const selected = team === key;
             const name = key === "TEAM_A" ? event.team_a : event.team_b;
             const logo = key === "TEAM_A" ? event.team_a_logo : event.team_b_logo;
-            return <button key={key} type="button" onClick={() => { setTeam(key); if (!idempotencyKey) setIdempotencyKey(crypto.randomUUID()); }} aria-pressed={selected} className={`relative flex min-h-40 flex-col items-center justify-center gap-3 rounded-2xl border p-4 transition ${selected ? "border-secondary bg-secondary/[.09] shadow-[0_0_24px_rgba(255,199,37,.14)]" : "border-white/10 bg-black/25 hover:border-white/25"}`}>
+            return <button key={key} type="button" onClick={() => setTeam(key)} aria-pressed={selected} className={`relative flex min-h-40 flex-col items-center justify-center gap-3 rounded-2xl border p-4 transition ${selected ? "border-secondary bg-secondary/[.09] shadow-[0_0_24px_rgba(255,199,37,.14)]" : "border-white/10 bg-black/25 hover:border-white/25"}`}>
               {selected && <span className="absolute right-2.5 top-2.5 flex size-6 items-center justify-center rounded-full bg-irf-gradient text-ink"><Check size={15} strokeWidth={3} /></span>}
               <TeamLogo src={logo} name={name} className="size-16 sm:size-20 md:size-24" />
               <span className="text-center text-sm font-extrabold leading-tight">{name}</span>
@@ -92,27 +209,57 @@ export function PredictionForm({ event, settings, predictions, supabaseConfigure
           })}
           <span aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 z-10 flex size-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-zinc-950 text-[9px] font-black text-zinc-400">VS</span>
         </div>
-        {fieldError("teamSelected") && <p className="mt-2 text-xs text-red-400">Elige un equipo.</p>}
+        <FieldError id="teamSelected-error" message={fieldError("teamSelected")} className="mt-2" />
       </section>
 
       {team && canRegister ? (
-        <form action={action} className="glass-panel space-y-6 p-4 sm:p-6" noValidate>
+        <form onSubmit={handleSubmit} className="glass-panel space-y-6 p-4 sm:p-6" noValidate>
           <div><p className="text-[10px] font-bold uppercase tracking-[.2em] text-primary">Paso 2</p><h2 className="mt-1 text-lg font-black">Registra tu participación</h2></div>
-          <input type="hidden" name="eventId" value={event.id} /><input type="hidden" name="teamSelected" value={team} /><input type="hidden" name="amount" value={amount} /><input type="hidden" name="idempotencyKey" value={idempotencyKey} />
           <div className="absolute -left-[9999px]" aria-hidden="true"><label>Sitio web<input name="website" tabIndex={-1} autoComplete="off" /></label></div>
 
           <div>
-            <label className="field-label">Monto</label>
-            <div className="grid grid-cols-4 gap-2">{[10,20,30,50].map((value) => <button key={value} type="button" onClick={() => { setAmount(value); setCustom(""); }} className={`min-h-11 rounded-xl border text-sm font-bold transition ${amount === value && !custom ? "border-secondary bg-secondary/10 text-secondary" : "border-white/10 bg-white/[.04] text-zinc-300"}`}>S/{value}</button>)}</div>
-            <label className="mt-3 block"><span className="sr-only">Otro monto</span><input className="field" inputMode="decimal" min={event.minimum_amount} max={10000} value={custom} onChange={(e) => { setCustom(e.target.value); setAmount(Number(e.target.value)); }} placeholder="Otro monto" /></label>
-            <div className="mt-3 flex items-center justify-between rounded-xl border border-primary/20 bg-primary/[.07] px-4 py-3"><span className="text-xs text-zinc-400">Posible resultado configurado</span><strong className="text-lg text-secondary">{soles(possible)}</strong></div>
+            <label className="field-label" htmlFor="amount">Monto</label>
+            <div className="grid grid-cols-4 gap-2">{AMOUNT_PRESETS.map((value) => <button key={value} type="button" onClick={() => setAmountInput(String(value))} aria-pressed={amountInput === String(value)} className={`min-h-11 rounded-xl border text-sm font-bold transition ${amountInput === String(value) ? "border-secondary bg-secondary/10 text-secondary" : "border-white/10 bg-white/[.04] text-zinc-300"}`}>S/{value}</button>)}</div>
+            <input
+              ref={amountRef}
+              id="amount"
+              className={`${fieldClass("amount")} mt-3`}
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
+              value={amountInput}
+              onChange={(changeEvent) => setAmountInput(sanitizeAmountInput(changeEvent.target.value))}
+              placeholder="Otro monto"
+              aria-invalid={Boolean(fieldError("amount"))}
+              aria-describedby={fieldError("amount") ? "amount-error" : "amount-hint"}
+            />
+            <FieldError id="amount-error" message={fieldError("amount")} className="mt-1.5" />
+            <div className="mt-3 flex items-center justify-between rounded-xl border border-primary/20 bg-primary/[.07] px-4 py-3">
+              <span className="text-xs text-zinc-400">Posible resultado configurado</span>
+              <strong className="text-lg text-secondary">{possible === null ? "—" : soles(possible)}</strong>
+            </div>
+            <p id="amount-hint" className="mt-1.5 text-[11px] text-zinc-500">
+              {possible === null ? `Ingresa un monto válido entre ${soles(minimumAmount)} y ${soles(MAX_PARTICIPATION_AMOUNT)} para ver el posible resultado.` : `Entre ${soles(minimumAmount)} y ${soles(MAX_PARTICIPATION_AMOUNT)}.`}
+            </p>
           </div>
 
           <div className="border-t border-white/10 pt-5"><p className="text-[10px] font-bold uppercase tracking-[.2em] text-primary">Tus datos</p></div>
-          <div><label className="field-label" htmlFor="name">Nombre completo</label><input className="field" id="name" name="name" autoComplete="name" maxLength={100} placeholder="Tu nombre y apellido" required />{fieldError("name") && <p className="mt-1.5 text-xs text-red-400">{fieldError("name")}</p>}</div>
+          <div>
+            <label className="field-label" htmlFor="name">Nombre completo</label>
+            <input ref={nameRef} className={fieldClass("name")} id="name" name="name" autoComplete="name" maxLength={100} placeholder="Tu nombre y apellido" value={name} onChange={(changeEvent) => setName(changeEvent.target.value)} aria-invalid={Boolean(fieldError("name"))} aria-describedby={fieldError("name") ? "name-error" : undefined} />
+            <FieldError id="name-error" message={fieldError("name")} className="mt-1.5" />
+          </div>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div><label className="field-label" htmlFor="phone">WhatsApp / celular</label><input className="field" id="phone" name="phone" inputMode="numeric" autoComplete="tel" maxLength={9} placeholder="987654321" required />{fieldError("phone") && <p className="mt-1.5 text-xs text-red-400">{fieldError("phone")}</p>}</div>
-            <div><label className="field-label" htmlFor="refundPhone">Número para devolución o contacto</label><input className="field" id="refundPhone" name="refundPhone" inputMode="numeric" autoComplete="tel" maxLength={9} placeholder="987654321" required />{fieldError("refundPhone") && <p className="mt-1.5 text-xs text-red-400">{fieldError("refundPhone")}</p>}</div>
+            <div>
+              <label className="field-label" htmlFor="phone">WhatsApp / celular</label>
+              <input ref={phoneRef} className={fieldClass("phone")} id="phone" name="phone" inputMode="numeric" autoComplete="tel" maxLength={PHONE_INPUT_MAX_LENGTH} placeholder="987654321" value={phone} onChange={(changeEvent) => setPhone(changeEvent.target.value)} aria-invalid={Boolean(fieldError("phone"))} aria-describedby={fieldError("phone") ? "phone-error" : undefined} />
+              <FieldError id="phone-error" message={fieldError("phone")} className="mt-1.5" />
+            </div>
+            <div>
+              <label className="field-label" htmlFor="refundPhone">Número para devolución o contacto</label>
+              <input ref={refundPhoneRef} className={fieldClass("refundPhone")} id="refundPhone" name="refundPhone" inputMode="numeric" autoComplete="tel" maxLength={PHONE_INPUT_MAX_LENGTH} placeholder="987654321" value={refundPhone} onChange={(changeEvent) => setRefundPhone(changeEvent.target.value)} aria-invalid={Boolean(fieldError("refundPhone"))} aria-describedby={fieldError("refundPhone") ? "refundPhone-error" : undefined} />
+              <FieldError id="refundPhone-error" message={fieldError("refundPhone")} className="mt-1.5" />
+            </div>
           </div>
 
           <section className="rounded-2xl border border-primary/20 bg-primary/[.055] p-4 sm:p-5" aria-labelledby="payment-title">
@@ -129,19 +276,20 @@ export function PredictionForm({ event, settings, predictions, supabaseConfigure
             </div>
           </section>
 
-          <div className="space-y-3">
-            <label className="field-label">Comprobante de pago <span className="text-primary">*</span></label>
-            {receiptPreview ? <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black/30 p-3"><img src={receiptPreview} alt="Vista previa del comprobante" className="mx-auto max-h-72 w-full rounded-xl object-contain" /><button type="button" onClick={removeReceipt} className="absolute right-5 top-5 flex size-9 items-center justify-center rounded-full bg-black/80 text-white" aria-label="Eliminar comprobante"><X size={18}/></button><p className="mt-3 text-center text-xs text-zinc-500">Puedes eliminarlo y seleccionar otra imagen.</p></div> : <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/20 bg-black/20 px-4 text-center transition hover:border-primary/50" htmlFor="receipt"><ImagePlus className="text-primary" /><span className="text-sm font-bold">Subir captura</span><span className="text-[11px] text-zinc-500">JPG, JPEG, PNG o WEBP · Máx. {settings.max_receipt_mb} MB</span></label>}
-            <input ref={receiptRef} className="sr-only" id="receipt" name="receipt" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => selectReceipt(event.target.files?.[0])} required />
+          <div ref={receiptGroupRef} tabIndex={-1} className="space-y-3 outline-none">
+            <label className="field-label" htmlFor="receipt">Comprobante de pago <span className="text-primary">*</span></label>
+            {receiptPreview ? <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black/30 p-3"><img src={receiptPreview} alt="Vista previa del comprobante" className="mx-auto max-h-72 w-full rounded-xl object-contain" /><button type="button" onClick={removeReceipt} className="absolute right-5 top-5 flex size-9 items-center justify-center rounded-full bg-black/80 text-white" aria-label="Eliminar comprobante"><X size={18}/></button><p className="mt-3 text-center text-xs text-zinc-500">Puedes eliminarlo y seleccionar otra imagen.</p></div> : <label className={`flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-black/20 px-4 text-center transition hover:border-primary/50 ${fieldError("receipt") ? "border-red-400/70" : "border-white/20"}`} htmlFor="receipt"><ImagePlus className="text-primary" /><span className="text-sm font-bold">Subir captura</span><span className="text-[11px] text-zinc-500">JPG, JPEG, PNG o WEBP · Máx. {maxReceiptMb} MB</span></label>}
+            <input ref={receiptInputRef} className="sr-only" id="receipt" name="receipt" type="file" accept="image/jpeg,image/png,image/webp" onChange={(changeEvent) => selectReceipt(changeEvent.target.files?.[0])} aria-invalid={Boolean(fieldError("receipt"))} aria-describedby={fieldError("receipt") ? "receipt-error" : undefined} />
+            <FieldError id="receipt-error" message={fieldError("receipt")} />
           </div>
 
           <div>
-            <label className="flex cursor-pointer items-start gap-3 text-sm leading-relaxed text-zinc-300"><input type="checkbox" name="acceptedRules" checked={acceptedRules} onChange={(event) => setAcceptedRules(event.target.checked)} className="mt-0.5 size-5 rounded border-white/20 bg-white/5 text-primary focus:ring-primary/30" required /><span>He leído y acepto las reglas de la dinámica.</span></label>
-            {!acceptedRules && <p className="mt-2 text-xs text-amber-300">Debes aceptar las reglas de la dinámica para continuar.</p>}
-            {fieldError("acceptedRules") && <p className="mt-2 text-xs text-red-400">{fieldError("acceptedRules")}</p>}
+            <label className="flex cursor-pointer items-start gap-3 text-sm leading-relaxed text-zinc-300"><input ref={rulesRef} type="checkbox" name="acceptedRules" checked={acceptedRules} onChange={(changeEvent) => setAcceptedRules(changeEvent.target.checked)} className="mt-0.5 size-5 rounded border-white/20 bg-white/5 text-primary focus:ring-primary/30" aria-invalid={Boolean(fieldError("acceptedRules"))} aria-describedby={fieldError("acceptedRules") ? "acceptedRules-error" : undefined} /><span>He leído y acepto las reglas de la dinámica.</span></label>
+            <FieldError id="acceptedRules-error" message={fieldError("acceptedRules")} className="mt-2" />
           </div>
-          {state.error && <div role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">{state.error}</div>}
-          <button className="primary-button" type="submit" disabled={pending || !acceptedRules || !idempotencyKey || !receiptPreview || amount < Number(event.minimum_amount)}>{pending ? "Registrando…" : "Registrar participación"}</button>
+
+          {state.error && <div ref={summaryRef} tabIndex={-1} role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200 outline-none">{state.error}</div>}
+          <button className="primary-button" type="submit" disabled={pending}>{pending ? "Registrando…" : "Registrar participación"}</button>
           <p className="flex items-center justify-center gap-1.5 text-center text-[11px] text-zinc-600"><LockKeyhole size={13} /> El pago será verificado manualmente.</p>
         </form>
       ) : !supabaseConfigured || dataError ? <UnavailableCard title="Servicio no disponible" text="No es posible abrir nuevos registros en este momento." /> : !eventExists ? <UnavailableCard title="Evento no disponible" text="El evento todavía no está disponible." /> : !settingsExists ? <UnavailableCard title="Registro no disponible" text="Falta la configuración operativa necesaria para abrir registros." /> : !registrationOpen ? <UnavailableCard title="Registros cerrados" text="Ya no se aceptan nuevas participaciones. Las registradas siguen visibles arriba." /> : settings.maintenance_mode ? <UnavailableCard title="Sitio en mantenimiento" text="Los registros están temporalmente pausados." /> : !settings.payment_qr_url ? <UnavailableCard title="QR oficial pendiente" text="Los registros permanecen cerrados hasta que un administrador cargue el QR oficial de IRF." /> : null}
@@ -149,6 +297,11 @@ export function PredictionForm({ event, settings, predictions, supabaseConfigure
       <details className="border-t border-white/10 px-1 pt-5 text-sm text-zinc-500"><summary className="cursor-pointer font-semibold text-zinc-300">Reglas de la dinámica</summary><p className="mt-3 whitespace-pre-line leading-relaxed">{settings.rules_text}</p></details>
     </div>
   );
+}
+
+function FieldError({ id, message, className = "" }: { id: string; message?: string; className?: string }) {
+  if (!message) return null;
+  return <p id={id} role="alert" className={`text-xs font-medium text-red-400 ${className}`}>{message}</p>;
 }
 
 // Chrome bloquea navigator.clipboard fuera de contexto seguro; execCommand cubre ese caso.
