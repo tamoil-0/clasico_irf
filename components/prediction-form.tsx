@@ -12,7 +12,18 @@ import type { EventRecord, PublicPrediction, PublicSettings, TeamSelection } fro
 
 const initialState: PredictionActionState = {};
 
-export function PredictionForm({ event, settings, predictions, configured, registrationOpen }: { event: EventRecord; settings: PublicSettings; predictions: PublicPrediction[]; configured: boolean; registrationOpen: boolean }) {
+type PredictionFormProps = {
+  event: EventRecord;
+  settings: PublicSettings;
+  predictions: PublicPrediction[];
+  supabaseConfigured: boolean;
+  eventExists: boolean;
+  settingsExists: boolean;
+  dataError: boolean;
+  registrationOpen: boolean;
+};
+
+export function PredictionForm({ event, settings, predictions, supabaseConfigured, eventExists, settingsExists, dataError, registrationOpen }: PredictionFormProps) {
   const [team, setTeam] = useState<TeamSelection | "">("");
   const [amount, setAmount] = useState(Number(event.minimum_amount));
   const [custom, setCustom] = useState("");
@@ -23,7 +34,7 @@ export function PredictionForm({ event, settings, predictions, configured, regis
   const [state, action, pending] = useActionState(createPrediction, initialState);
   useEffect(() => () => { if (receiptPreview) URL.revokeObjectURL(receiptPreview); }, [receiptPreview]);
 
-  const canRegister = configured && registrationOpen && !settings.maintenance_mode && Boolean(settings.payment_qr_url);
+  const canRegister = supabaseConfigured && eventExists && settingsExists && !dataError && registrationOpen && !settings.maintenance_mode && Boolean(settings.payment_qr_url);
   const chosenName = team === "TEAM_A" ? event.team_a : team === "TEAM_B" ? event.team_b : null;
   const possible = useMemo(() => calculatedReturn(amount || 0, Number(event.multiplier)), [amount, event.multiplier]);
   const fieldError = (key: string) => state.fieldErrors?.[key]?.[0];
@@ -46,7 +57,9 @@ export function PredictionForm({ event, settings, predictions, configured, regis
         <p className="mt-3 text-sm font-medium capitalize text-zinc-400">{formatMatch(event.match_date, event.match_time)}</p>
       </section>
 
-      {!configured && <div className="rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-center text-xs leading-relaxed text-amber-100">Configuración pendiente: conecta Supabase y crea el evento antes de abrir registros. No se guardarán datos hasta completar esa configuración.</div>}
+      {!supabaseConfigured && <div className="rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-center text-xs leading-relaxed text-amber-100">El sistema está temporalmente fuera de servicio.</div>}
+      {supabaseConfigured && dataError && <div className="rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-center text-xs leading-relaxed text-amber-100">No pudimos cargar toda la información del evento. Inténtalo nuevamente.</div>}
+      {supabaseConfigured && !dataError && !eventExists && <div className="rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-center text-xs leading-relaxed text-amber-100">El evento todavía no está disponible.</div>}
 
       <section className="grid grid-cols-2 gap-3" aria-label="Condiciones">
         <div className="glass-panel p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Monto mínimo</p><p className="mt-1 text-xl font-black">{soles(event.minimum_amount)}</p></div>
@@ -131,7 +144,7 @@ export function PredictionForm({ event, settings, predictions, configured, regis
           <button className="primary-button" type="submit" disabled={pending || !acceptedRules || !idempotencyKey || !receiptPreview || amount < Number(event.minimum_amount)}>{pending ? "Registrando…" : "Registrar participación"}</button>
           <p className="flex items-center justify-center gap-1.5 text-center text-[11px] text-zinc-600"><LockKeyhole size={13} /> El pago será verificado manualmente.</p>
         </form>
-      ) : !registrationOpen ? <UnavailableCard title="Registros cerrados" text="Ya no se aceptan nuevas participaciones. Las registradas siguen visibles arriba." /> : settings.maintenance_mode ? <UnavailableCard title="Sitio en mantenimiento" text="Los registros están temporalmente pausados." /> : !configured ? <UnavailableCard title="Configuración pendiente" text="Los registros abrirán cuando Supabase esté configurado." /> : !settings.payment_qr_url ? <UnavailableCard title="QR oficial pendiente" text="Los registros permanecen cerrados hasta que un administrador cargue el QR oficial de IRF." /> : null}
+      ) : !supabaseConfigured || dataError ? <UnavailableCard title="Servicio no disponible" text="No es posible abrir nuevos registros en este momento." /> : !eventExists ? <UnavailableCard title="Evento no disponible" text="El evento todavía no está disponible." /> : !settingsExists ? <UnavailableCard title="Registro no disponible" text="Falta la configuración operativa necesaria para abrir registros." /> : !registrationOpen ? <UnavailableCard title="Registros cerrados" text="Ya no se aceptan nuevas participaciones. Las registradas siguen visibles arriba." /> : settings.maintenance_mode ? <UnavailableCard title="Sitio en mantenimiento" text="Los registros están temporalmente pausados." /> : !settings.payment_qr_url ? <UnavailableCard title="QR oficial pendiente" text="Los registros permanecen cerrados hasta que un administrador cargue el QR oficial de IRF." /> : null}
 
       <details className="border-t border-white/10 px-1 pt-5 text-sm text-zinc-500"><summary className="cursor-pointer font-semibold text-zinc-300">Reglas de la dinámica</summary><p className="mt-3 whitespace-pre-line leading-relaxed">{settings.rules_text}</p></details>
     </div>
