@@ -8,6 +8,17 @@ const adminPassword = process.env.TEST_ADMIN_PASSWORD;
 const integration = url && anonKey ? describe : describe.skip;
 
 integration("RLS de Supabase", () => {
+  it("expone solo campos públicos de registros pendientes o verificados", async () => {
+    const client = createClient(url!, anonKey!, { auth: { persistSession: false } });
+    const eventId = process.env.TEST_EVENT_ID || "00000000-0000-4000-8000-000000000001";
+    const { data, error } = await client.rpc("public_registered_predictions", { p_event_id: eventId });
+    expect(error).toBeNull();
+    for (const row of data || []) {
+      expect(Object.keys(row).sort()).toEqual(["created_at", "display_amount", "masked_name", "status", "team_selected", "verified_at"]);
+      expect(["PENDING", "VERIFIED"]).toContain(row.status);
+    }
+  });
+
   it("bloquea al público al intentar listar registros", async () => {
     const client = createClient(url!, anonKey!, { auth: { persistSession: false } });
     const { data, error } = await client.from("predictions").select("id,phone");

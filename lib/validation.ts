@@ -10,7 +10,7 @@ export const predictionFieldsSchema = z.object({
   refundPhone: z.string().regex(/^9\d{8}$/, "Ingresa un número de devolución válido."),
   teamSelected: z.enum(["TEAM_A", "TEAM_B"]),
   amount: z.coerce.number().finite().positive().max(10000),
-  acceptedRules: z.literal("on", { errorMap: () => ({ message: "Debes aceptar las reglas." }) }),
+  acceptedRules: z.literal("on", { errorMap: () => ({ message: "Debes aceptar las reglas de la dinámica para continuar." }) }),
   idempotencyKey: z.string().uuid(),
   website: z.string().max(0, "Solicitud inválida."),
 });

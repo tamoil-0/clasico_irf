@@ -30,12 +30,13 @@ export interface PublicSettings {
   max_receipt_mb: number;
 }
 
-export interface PublicVerifiedPrediction {
+export interface PublicPrediction {
   masked_name: string;
   team_selected: TeamSelection;
-  verified_amount: number;
-  verified_at: string;
+  display_amount: number;
+  status: "PENDING" | "VERIFIED";
   created_at: string;
+  verified_at: string | null;
 }
 
 export interface PredictionRecord {

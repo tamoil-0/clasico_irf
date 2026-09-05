@@ -36,6 +36,12 @@ describe("reglas de registro", () => {
     const result = predictionFieldsSchema.safeParse({ eventId: crypto.randomUUID(), name: "Persona Prueba", phone: "987654321", refundPhone: "987654321", teamSelected: "TEAM_A", amount: 10, acceptedRules: "on", idempotencyKey: crypto.randomUUID(), website: "" });
     expect(result.success).toBe(true);
   });
+
+  it("informa específicamente cuando no se aceptaron las reglas", () => {
+    const result = predictionFieldsSchema.safeParse({ eventId: crypto.randomUUID(), name: "Persona Prueba", phone: "987654321", refundPhone: "987654321", teamSelected: "TEAM_A", amount: 10, acceptedRules: null, idempotencyKey: crypto.randomUUID(), website: "" });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.flatten().fieldErrors.acceptedRules).toContain("Debes aceptar las reglas de la dinámica para continuar.");
+  });
 });
 
 describe("privacidad pública", () => {

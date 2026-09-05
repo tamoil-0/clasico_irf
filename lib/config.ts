@@ -5,10 +5,10 @@ import type { EventRecord, PublicSettings } from "@/lib/types";
 export const DEFAULT_EVENT: EventRecord = {
   id: "00000000-0000-4000-8000-000000000001",
   title: "Clásico IRF",
-  team_a: "Universitario",
-  team_b: "Alianza Lima",
-  team_a_logo: "/teams/universitario.svg",
-  team_b_logo: "/teams/alianza-lima.svg",
+  team_a: "Alianza Lima",
+  team_b: "Universitario",
+  team_a_logo: "/teams/alianza-lima.svg",
+  team_b_logo: "/teams/universitario.svg",
   match_date: "2026-09-12",
   match_time: "20:00",
   betting_close_at: "2026-09-12T19:45:00-05:00",
@@ -35,5 +35,5 @@ export const PAYMENT_PHONE_VALUE = "+51916294194";
 export const DRAW_RULE_TEXT = "Si el partido termina empatado, las participaciones verificadas serán destinadas a apoyar los fondos y actividades de IRF.";
 
 export function hasSupabaseEnv() {
-  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim());
 }

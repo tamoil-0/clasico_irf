@@ -6,8 +6,8 @@ insert into public.events (
   minimum_amount, multiplier, risk_mode, risk_limit_amount
 ) values (
   '00000000-0000-4000-8000-000000000001',
-  'Clásico IRF', 'Universitario', 'Alianza Lima',
-  '/teams/universitario.svg', '/teams/alianza-lima.svg',
+  'Clásico IRF', 'Alianza Lima', 'Universitario',
+  '/teams/alianza-lima.svg', '/teams/universitario.svg',
   '2026-09-12', '20:00', '2026-09-12 19:45:00-05',
   'CLOSED', 10, 1.50, 'OPEN', 0
 ) on conflict (id) do nothing;

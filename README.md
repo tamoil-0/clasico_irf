@@ -39,6 +39,8 @@ npm run build
 3. En **SQL Editor**, ejecuta en orden:
    - `supabase/migrations/202609020001_initial_schema.sql`
    - `supabase/migrations/202609030001_public_verified_and_atomic_verification.sql`
+   - `supabase/migrations/202609030002_team_assets_bucket.sql`
+   - `supabase/migrations/202609050001_public_registered_predictions_and_team_order.sql`
 4. Ejecuta `supabase/seed.sql`. Solo crea el evento solicitado y la configuración base: no inserta participantes ni datos personales ficticios. El evento nace `CLOSED` y sin QR.
 
 Con Supabase CLI, la alternativa es:
@@ -58,15 +60,16 @@ supabase db seed
 - `settlements`: cálculos administrativos posteriores al resultado.
 - `submission_attempts`: rate limit anonimizado.
 
-Todas las tablas tienen RLS. `anon` no puede listar ni modificar participantes, teléfonos, comprobantes o notas. La RPC `public_verified_predictions` expone exclusivamente:
+Todas las tablas tienen RLS. `anon` no puede listar ni modificar participantes, teléfonos, comprobantes o notas. La RPC `public_registered_predictions` expone exclusivamente:
 
 - `masked_name`
 - `team_selected`
-- `verified_amount`
-- `verified_at`
+- `display_amount`
+- `status`
 - `created_at`
+- `verified_at`
 
-Solo devuelve filas cuyo estado sea exactamente `VERIFIED`. El enmascaramiento se realiza dentro de Postgres, no después de exponer el nombre completo.
+Solo devuelve filas `PENDING` o `VERIFIED`. Para una pendiente, `display_amount` es el monto declarado; para una verificada, es el monto realmente verificado. El enmascaramiento se realiza dentro de Postgres, no después de exponer el nombre completo.
 
 ### 3. Storage
 
@@ -147,14 +150,15 @@ Importa el repositorio `irf_so` y configura en Vercel:
 3. **Abrir registros:** cambia `events.status` de `CLOSED` a `OPEN`. Sin QR, la UI continúa bloqueada.
 4. **Verificar participaciones:** abre el registro, inspecciona el comprobante mediante signed URL e ingresa el monto realmente recibido. La RPC atómica usa `verified_amount` y aplica `HARD_LIMIT` del lado servidor.
 5. **Cerrar registros:** cambia el estado a `CLOSED`, o deja que `betting_close_at` bloquee automáticamente cada nuevo intento.
-6. **Registrar resultado:** confirma Universitario, empate o Alianza desde **Resultados**.
+6. **Registrar resultado:** confirma Alianza, empate o Universitario desde **Resultados**.
 7. **Gestionar liquidaciones:** ganadores quedan `PENDING_SETTLEMENT`; perdedores `VOID`; un empate asigna `IRF_FUNDS` y monto calculado cero. No se genera devolución ni pago automático.
 
 ## G. Reglas técnicas clave
 
-- La participación nace `PENDING` y solo `VERIFIED` aparece públicamente.
+- La participación nace `PENDING` y aparece de inmediato en la lista pública; al validarse cambia a `VERIFIED`.
 - `maskParticipantName()` produce, por ejemplo, `Jhon Aracayo Mamani → Jhon A.`. Postgres replica la misma regla antes de devolver datos públicos.
-- El importe derivado siempre usa `verified_amount`, nunca `declared_amount`.
+- La lista pública muestra `declared_amount` solo mientras una fila está `PENDING` y `verified_amount` cuando está `VERIFIED`; nunca entrega ninguno de esos campos directamente.
+- Los cálculos financieros, de exposición, riesgo y liquidación siempre usan `verified_amount`, nunca `declared_amount`.
 - Exposición: `POOL=A+B`, `LIABILITY_A=A×M`, `LIABILITY_B=B×M`, `BALANCE=POOL−LIABILITY`.
 - `OPEN` acepta; `WARN` alerta; `HARD_LIMIT` impide superar la pérdida configurada. La verificación usa advisory lock por evento para evitar carreras.
 - El formulario tiene honeypot, idempotency key, validación Zod, firma real del archivo, constraints SQL y rate limit persistente de 5 intentos por 10 minutos.
